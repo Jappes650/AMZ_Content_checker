@@ -1,33 +1,21 @@
-name: Build Desktop Apps
+name: Build Desktop Apps (Win + macOS)
 
 on:
+  workflow_dispatch:    # manuell startbar
   push:
     tags:
-      - 'v*'        # auf Tags automatisch Release erzeugen (optional)
-  workflow_dispatch: # manuell startbar
+      - 'v*'           # optional: Release-Build, wenn Tag wie v1.0.0 gepusht wird
 
 jobs:
-  build:
-    name: Build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: windows-latest
-            pyversion: '3.11'
-            pkg_suffix: 'win'
-          - os: macos-latest
-            pyversion: '3.11'
-            pkg_suffix: 'mac'
-
+  build-windows:
+    runs-on: windows-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.pyversion }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.pyversion }}
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
@@ -35,73 +23,78 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      # Optional: Verifizieren, dass der Code importiert (früher Fehlerfang)
-      - name: Lint quick import
+      - name: Quick import check
         run: python -c "import sys; sys.path.append('src'); import app; print('OK')"
 
-      # PyInstaller-Build
-      - name: Build with PyInstaller (Windows/macOS)
-        shell: bash
+      - name: Build EXE with PyInstaller
         run: |
-          APP_NAME="Amazon Image Scraper"
-          ENTRY="src/app.py"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            pyinstaller "$ENTRY" \
-              --name "$APP_NAME" \
-              --onefile \
-              --noconsole
-          else
-            # macOS: .app Bundle mit GUI (kein Terminalfenster)
-            pyinstaller "$ENTRY" \
-              --name "$APP_NAME" \
-              --windowed \
-              --onedir
-          fi
+          pyinstaller src/app.py ^
+            --name "Amazon Image Scraper" ^
+            --onefile ^
+            --noconsole
+        shell: cmd
 
-      # Artefakte packen
-      - name: Package artifacts
-        shell: bash
+      - name: Zip artifact
         run: |
-          APP_NAME="Amazon Image Scraper"
-          OUTDIR="dist"
-          PKGDIR="package_${{ matrix.pkg_suffix }}"
-          mkdir -p "$PKGDIR"
+          powershell -Command "Compress-Archive -Path 'dist/Amazon Image Scraper.exe' -DestinationPath 'Amazon-Image-Scraper_win.zip'"
 
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            # EXE in Paketordner kopieren
-            cp "dist/${APP_NAME}.exe" "$PKGDIR/" || cp "dist/${APP_NAME}/${APP_NAME}.exe" "$PKGDIR/" || true
-            7z a "${APP_NAME}_${{ matrix.pkg_suffix }}.zip" "$PKGDIR/*"
-            echo "PKG_FILE=${APP_NAME}_${{ matrix.pkg_suffix }}.zip" >> $GITHUB_ENV
-          else
-            # macOS: .app Bundle → zippen
-            # PyInstaller legt bei --onedir eine .app in dist/$APP_NAME/$APP_NAME.app ab
-            APP_PATH=""
-            if [ -d "dist/${APP_NAME}.app" ]; then
-              APP_PATH="dist/${APP_NAME}.app"
-            elif [ -d "dist/${APP_NAME}/${APP_NAME}.app" ]; then
-              APP_PATH="dist/${APP_NAME}/${APP_NAME}.app"
-            fi
-            if [ -z "$APP_PATH" ]; then
-              echo "Konnte .app nicht finden"; exit 1
-            fi
-            ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "${APP_NAME}_${{ matrix.pkg_suffix }}.zip"
-            echo "PKG_FILE=${APP_NAME}_${{ matrix.pkg_suffix }}.zip" >> $GITHUB_ENV
-          fi
-
-      - name: Upload artifact
+      - name: Upload artifact (Win)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.PKG_FILE }}
-          path: ${{ env.PKG_FILE }}
+          name: Amazon-Image-Scraper_win.zip
+          path: Amazon-Image-Scraper_win.zip
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Quick import check
+        run: python -c "import sys; sys.path.append('src'); import app; print('OK')"
+
+      - name: Build .app with PyInstaller
+        run: |
+          pyinstaller src/app.py \
+            --name "Amazon Image Scraper" \
+            --windowed \
+            --onedir
+
+      - name: Zip .app bundle
+        run: |
+          APP_PATH=""
+          if [ -d "dist/Amazon Image Scraper.app" ]; then
+            APP_PATH="dist/Amazon Image Scraper.app"
+          elif [ -d "dist/Amazon Image Scraper/Amazon Image Scraper.app" ]; then
+            APP_PATH="dist/Amazon Image Scraper/Amazon Image Scraper.app"
+          fi
+          if [ -z "$APP_PATH" ]; then
+            echo "Konnte .app nicht finden"; exit 1
+          fi
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "Amazon-Image-Scraper_mac.zip"
+
+      - name: Upload artifact (macOS)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Amazon-Image-Scraper_mac.zip
+          path: Amazon-Image-Scraper_mac.zip
 
   release:
-    name: Create Release (on tag)
-    needs: build
+    needs: [build-windows, build-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: ./artifacts
 
