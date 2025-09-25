@@ -18,6 +18,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
 from PIL import Image  # Pillow
@@ -278,8 +280,8 @@ def update_progress_display(self, asin, prozent, status="erfolgreich"):
 class AmazonImageScraper:
     def __init__(self, master):
         self.master = master
-        master.title("Amazon Image Scraper – Multi-Country (final)")
-        master.geometry("540x450")
+        master.title("Amazon Image Scraper – Multi-Country (PLZ & Buybox Fix)")
+        master.geometry("560x500")
 
         self.countries = {
             "Deutschland (DE)": {"code": "de", "domain": "amazon.de"},
@@ -302,11 +304,13 @@ class AmazonImageScraper:
                                              values=list(self.countries.keys()), state="readonly", width=26)
         self.country_combobox.set("Deutschland (DE)"); self.country_combobox.pack(side=LEFT, padx=5)
 
+        # Login
         self.button_login = Button(frame, text="Amazon Login", command=self.login_func, bg='blue', fg='white')
         self.button_login.pack(side=TOP, pady=5)
         self.login_status = Label(frame, text="Status: Nicht angemeldet", fg='red')
         self.login_status.pack(side=TOP, pady=5)
 
+        # Performance/Optionen
         perf_frame = Frame(frame); perf_frame.pack(pady=5)
         Label(perf_frame, text="Min Pause (Sek):").grid(row=0, column=0, padx=2, sticky=E)
         self.min_pause_var = StringVar(value="2")
@@ -324,10 +328,18 @@ class AmazonImageScraper:
         self.min_image_cols_var = StringVar(value="9")
         Entry(perf_frame, textvariable=self.min_image_cols_var, width=6).grid(row=1, column=3, padx=2)
 
+        # Neue Eingabe: Liefer-PLZ
+        plz_frame = Frame(frame); plz_frame.pack(pady=5)
+        Label(plz_frame, text="Liefer-PLZ:").grid(row=0, column=0, padx=5, sticky=E)
+        self.zip_var = StringVar(value="")
+        Entry(plz_frame, textvariable=self.zip_var, width=12).grid(row=0, column=1, padx=5, sticky=W)
+        Label(plz_frame, text="(wird vor der 1. Suche angewendet)").grid(row=0, column=2, padx=5, sticky=W)
+
+        # Datei Button
         self.button1 = Button(frame, text="ASIN.csv Liste öffnen", command=self.start_scraping, bg='#0a7', fg='white')
         self.button1.pack(side=TOP, pady=10)
 
-        self.progress = ttk.Progressbar(master, length=500, mode='determinate'); self.progress.pack(pady=5)
+        self.progress = ttk.Progressbar(master, length=520, mode='determinate'); self.progress.pack(pady=5)
 
         scrollbar = Scrollbar(master); scrollbar.pack(side=RIGHT, fill=Y)
         self.output = Text(master, width="100", height="16", background='black', fg='lime',
@@ -468,9 +480,60 @@ class AmazonImageScraper:
             if hasattr(self, 'complete_button'): self.complete_button.destroy()
             driver.quit(); return False
 
+    # --------- NEU: Liefer-PLZ anwenden, bevor erste Suche startet ---------
+    def apply_zip_before_search(self, driver):
+        zip_code = (self.zip_var.get() or "").strip()
+        if not zip_code:
+            self.update_output("ℹ️ Keine Liefer-PLZ gesetzt – überspringe Standortanpassung.")
+            return
+
+        domain = self.get_selected_domain()
+        self.update_output(f"📍 Setze Liefer-PLZ '{zip_code}' auf {domain}...")
+
+        try:
+            # Homepage laden (mit sichtbaren Bildern, sonst sind Popover-Assets evtl. nicht da)
+            driver.execute_cdp_cmd('Network.setUserAgentOverride', {"userAgent": self.get_random_user_agent()})
+            driver.get(f"https://www.{domain}/?language=en")
+            WebDriverWait(driver, 15).until(lambda d: d.execute_script("return document.readyState")=="complete")
+
+            # Popover öffnen
+            link = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "#nav-global-location-popover-link"))
+            )
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link)
+            time.sleep(0.3)
+            try:
+                link.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", link)
+
+            # Input finden & PLZ setzen
+            zip_input = WebDriverWait(driver, 10).until(
+                EC.visibility_of_element_located((By.CSS_SELECTOR, "#GLUXZipUpdateInput"))
+            )
+            zip_input.clear()
+            zip_input.send_keys(zip_code)
+
+            # Apply klicken
+            apply_btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "#GLUXZipUpdate"))
+            )
+            try:
+                apply_btn.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", apply_btn)
+
+            # Kurzes Warten, bis Standort übernommen wird
+            time.sleep(2.0)
+            self.update_output("✅ Liefer-PLZ angewendet.")
+
+        except Exception as e:
+            self.update_output(f"⚠️ Konnte Liefer-PLZ nicht setzen: {e}. Fahre ohne fort.")
+
     def scrape_product_data(self):
         if not self.is_logged_in:
-            messagebox.showerror("Fehler", "Bitte melden Sie sich zuerst bei Amazon an!"); return
+            messagebox.showerror("Fehler", "Bitte melden Sie sich zuerst bei Amazon an!")
+            return
 
         import_file_path = filedialog.askopenfilename(
             title="ASIN CSV-Datei auswählen", filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
@@ -509,6 +572,9 @@ class AmazonImageScraper:
             try:
                 driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
                 self.load_cookies(driver)
+
+                # >>> Neu: Liefer-PLZ setzen, BEVOR die erste Produktseite geladen wird
+                self.apply_zip_before_search(driver)
 
                 for i, asin_raw in enumerate(data.iloc[:,0]):
                     try:
@@ -567,16 +633,18 @@ class AmazonImageScraper:
                         # Preis
                         price = extract_price(soup, domain)
 
-                        # Verkäufer
+                        # Verkäufer (leer, wenn nicht gefunden)
                         seller_el = (
                             soup.find('span', {'class': 'a-size-small mbcMerchantName'}) or
                             soup.find('a', {'id':'sellerProfileTriggerId'}) or
                             soup.find('div', {'id':'merchant-info'})
                         )
-                        seller = seller_el.get_text(strip=True) if seller_el else "Amazon"
+                        seller = seller_el.get_text(strip=True) if seller_el else ""
 
-                        # Buybox (einfacher Indikator)
-                        buybox = "Nicht Qualifiziert" if soup.find('div', {'id':'unqualifiedBuyBox'}) else "Qualifiziert"
+                        # Buybox-Entscheidung NUR über Verkäufer-Feld:
+                        # - Verkäufer leer  -> Nicht Qualifiziert
+                        # - Verkäufer gesetzt -> Qualifiziert
+                        buybox = "Qualifiziert" if seller else "Nicht Qualifiziert"
 
                         # Schreiben Basisdaten
                         worksheet.write(row, 0, sanitize_excel_text(asin))
