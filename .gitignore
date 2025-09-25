@@ -1,1 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# PyInstaller output
+build/
+dist/
+*.spec
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Runtime artifacts
+*.log
+*.xlsx
+*.pkl
+chrome_user_data_*/
 
