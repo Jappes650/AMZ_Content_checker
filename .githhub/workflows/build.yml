@@ -1,0 +1,112 @@
+name: Build Desktop Apps
+
+on:
+  push:
+    tags:
+      - 'v*'        # auf Tags automatisch Release erzeugen (optional)
+  workflow_dispatch: # manuell startbar
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            pyversion: '3.11'
+            pkg_suffix: 'win'
+          - os: macos-latest
+            pyversion: '3.11'
+            pkg_suffix: 'mac'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.pyversion }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.pyversion }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      # Optional: Verifizieren, dass der Code importiert (früher Fehlerfang)
+      - name: Lint quick import
+        run: python -c "import sys; sys.path.append('src'); import app; print('OK')"
+
+      # PyInstaller-Build
+      - name: Build with PyInstaller (Windows/macOS)
+        shell: bash
+        run: |
+          APP_NAME="Amazon Image Scraper"
+          ENTRY="src/app.py"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            pyinstaller "$ENTRY" \
+              --name "$APP_NAME" \
+              --onefile \
+              --noconsole
+          else
+            # macOS: .app Bundle mit GUI (kein Terminalfenster)
+            pyinstaller "$ENTRY" \
+              --name "$APP_NAME" \
+              --windowed \
+              --onedir
+          fi
+
+      # Artefakte packen
+      - name: Package artifacts
+        shell: bash
+        run: |
+          APP_NAME="Amazon Image Scraper"
+          OUTDIR="dist"
+          PKGDIR="package_${{ matrix.pkg_suffix }}"
+          mkdir -p "$PKGDIR"
+
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            # EXE in Paketordner kopieren
+            cp "dist/${APP_NAME}.exe" "$PKGDIR/" || cp "dist/${APP_NAME}/${APP_NAME}.exe" "$PKGDIR/" || true
+            7z a "${APP_NAME}_${{ matrix.pkg_suffix }}.zip" "$PKGDIR/*"
+            echo "PKG_FILE=${APP_NAME}_${{ matrix.pkg_suffix }}.zip" >> $GITHUB_ENV
+          else
+            # macOS: .app Bundle → zippen
+            # PyInstaller legt bei --onedir eine .app in dist/$APP_NAME/$APP_NAME.app ab
+            APP_PATH=""
+            if [ -d "dist/${APP_NAME}.app" ]; then
+              APP_PATH="dist/${APP_NAME}.app"
+            elif [ -d "dist/${APP_NAME}/${APP_NAME}.app" ]; then
+              APP_PATH="dist/${APP_NAME}/${APP_NAME}.app"
+            fi
+            if [ -z "$APP_PATH" ]; then
+              echo "Konnte .app nicht finden"; exit 1
+            fi
+            ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "${APP_NAME}_${{ matrix.pkg_suffix }}.zip"
+            echo "PKG_FILE=${APP_NAME}_${{ matrix.pkg_suffix }}.zip" >> $GITHUB_ENV
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG_FILE }}
+          path: ${{ env.PKG_FILE }}
+
+  release:
+    name: Create Release (on tag)
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
