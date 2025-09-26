@@ -121,7 +121,6 @@ def download_image_safe(url: str, timeout: int = 12):
         return None, None, (0, 0)
 
 def extract_price(soup: BeautifulSoup, domain: str) -> str:
-    # 1) Bevorzugt a-offscreen (kompletter Preis inkl. Fraction)
     selectors = [
         '#corePrice_feature_div span.a-offscreen',
         '.reinventPricePriceToPayMargin span.a-offscreen',
@@ -136,7 +135,6 @@ def extract_price(soup: BeautifulSoup, domain: str) -> str:
             t = el.get_text(strip=True)
             if t: return sanitize_excel_text(t)
 
-    # 2) Fallback: whole + fraction zusammensetzen
     whole_el = soup.select_one('span.a-price span.a-price-whole') or soup.select_one('span.a-price-whole')
     frac_el  = soup.select_one('span.a-price span.a-price-fraction') or soup.select_one('span.a-price-fraction')
     if whole_el:
@@ -154,17 +152,9 @@ def parse_background_url(style_value: str) -> str:
 
 # ================= Bild-Extraktion ausschließlich aus <div class="ivRow"> =================
 def extract_image_urls(soup: BeautifulSoup, want: int = 50) -> list:
-    """
-    Liest nur die Galerie aus allen <div class="ivRow">:
-      - In jeder Row: alle <div class="ivThumb">,
-      - Bild-URL aus innerem <div class="ivThumbImage" style="background: url(...)" />
-      - Reihenfolge per id="ivImage_X" (fallback data-csa-c-posy)
-    Ergebnis: [Bild_0 (Hauptbild), Bild_1, Bild_2, ...]
-    """
     items = []  # (pos, url)
     for row in soup.select("div.ivRow"):
         for thumb in row.select("div.ivThumb"):
-            # Position bestimmen
             id_attr = thumb.get("id", "")
             m = re.search(r"ivImage_(\d+)", id_attr)
             if m:
@@ -175,7 +165,6 @@ def extract_image_urls(soup: BeautifulSoup, want: int = 50) -> list:
                 except ValueError:
                     pos = 9999
 
-            # URL aus style
             img_div = thumb.select_one("div.ivThumbImage[style]")
             if not img_div:
                 continue
@@ -184,7 +173,6 @@ def extract_image_urls(soup: BeautifulSoup, want: int = 50) -> list:
                 continue
             items.append((pos, src))
 
-    # sortieren & normalisieren & deduplizieren
     items.sort(key=lambda t: t[0])
     final = []
     seen_keys = set()
@@ -200,11 +188,7 @@ def extract_image_urls(soup: BeautifulSoup, want: int = 50) -> list:
 
     return final[:want]
 
-# ================== Galerie wirklich laden (Klick + wait & scroll) ==================
 def click_main_image_to_init_gallery(driver):
-    """
-    Klickt das Hauptbild/den ImageBlock an, damit Amazon den Immersive-View/ivRow rendert.
-    """
     selectors = [
         "#imageBlock_feature_div img#landingImage",
         "#imageBlock_feature_div #imgTagWrapperId img",
@@ -223,7 +207,6 @@ def click_main_image_to_init_gallery(driver):
             try:
                 elem.click()
             except Exception:
-                # fallback: JS-click
                 driver.execute_script("arguments[0].click();", elem)
             return True
         except Exception:
@@ -231,12 +214,6 @@ def click_main_image_to_init_gallery(driver):
     return False
 
 def ensure_gallery_loaded(driver, max_wait=10, scroll_tries=4):
-    """
-    Sorgt dafür, dass die ivRow/ivThumbImage-Elemente im DOM vorhanden sind:
-    - scrollt den Galerieblock in den Viewport
-    - macht leichte Scroll-Bewegungen, um Lazy-Load zu triggern
-    - wartet gezielt auf 'div.ivRow div.ivThumbImage'
-    """
     try:
         driver.execute_script("""
             var el = document.querySelector('#altImages') 
@@ -276,6 +253,42 @@ def update_progress_display(self, asin, prozent, status="erfolgreich"):
     self.output.insert(END, f"ASIN: {asin} {prozent} {status}!\n")
     self.output.see("end")
 
+# --- Helper: Länderspezifische PLZ in zwei Teile aufsplitten (PL, SE) ---
+def split_zip_parts(country_label: str, zip_code: str):
+    """
+    Gibt (part0, part1) oder (None, None) zurück, wenn keine Zweiteilung nötig ist.
+    country_label entspricht dem Combobox-Text, z.B. "Polen (PL)" oder "Schweden (SE)".
+    """
+    if not zip_code:
+        return None, None
+    raw = zip_code.strip()
+
+    # Polen: "00-001" oder "00001" -> "00" + "001"
+    if "Polen" in country_label or "(PL)" in country_label:
+        if "-" in raw:
+            left, right = raw.split("-", 1)
+        else:
+            digits = "".join(ch for ch in raw if ch.isalnum())
+            if len(digits) >= 5:
+                left, right = digits[:2], digits[2:5]
+            else:
+                return None, None
+        return left[:2], right[:3]
+
+    # Schweden: "111 20" oder "11120" -> "111" + "20"
+    if "Schweden" in country_label or "(SE)" in country_label:
+        if " " in raw:
+            left, right = raw.split(" ", 1)
+        else:
+            digits = "".join(ch for ch in raw if ch.isalnum())
+            if len(digits) >= 5:
+                left, right = digits[:3], digits[3:5]
+            else:
+                return None, None
+        return left[:3], right[:2]
+
+    return None, None
+
 # ================= GUI / Main =================
 class AmazonImageScraper:
     def __init__(self, master):
@@ -283,6 +296,7 @@ class AmazonImageScraper:
         master.title("Amazon Image Scraper – Multi-Country (PLZ & Buybox Fix)")
         master.geometry("560x500")
 
+        # Länder
         self.countries = {
             "Deutschland (DE)": {"code": "de", "domain": "amazon.de"},
             "Frankreich (FR)": {"code": "fr", "domain": "amazon.fr"},
@@ -296,13 +310,35 @@ class AmazonImageScraper:
             "Belgien (BE)": {"code": "be", "domain": "amazon.com.be"},
         }
 
+        # Standard-PLZ je Land (Vorgaben)
+        self.default_zip = {
+            "Deutschland (DE)": "10115",
+            "Frankreich (FR)": "75001",
+            "Spanien (ES)": "28001",
+            "Schweden (SE)": "111 20",
+            "Niederlande (NL)": "1011",
+            "Polen (PL)": "00-001",
+            "Italien (IT)": "184",
+            "Großbritannien (UK)": "EC1A 1BB",
+            "USA (US)": "10001",
+            "Belgien (BE)": "1000",
+        }
+
         frame = Frame(); frame.pack(pady=10)
         country_frame = Frame(frame); country_frame.pack(pady=5)
         Label(country_frame, text="Land auswählen:").pack(side=LEFT, padx=5)
         self.country_var = StringVar()
-        self.country_combobox = ttk.Combobox(country_frame, textvariable=self.country_var,
-                                             values=list(self.countries.keys()), state="readonly", width=26)
-        self.country_combobox.set("Deutschland (DE)"); self.country_combobox.pack(side=LEFT, padx=5)
+        self.country_combobox = ttk.Combobox(
+            country_frame,
+            textvariable=self.country_var,
+            values=list(self.countries.keys()),
+            state="readonly",
+            width=26
+        )
+        self.country_combobox.set("Deutschland (DE)")
+        self.country_combobox.pack(side=LEFT, padx=5)
+        # Beim Wechsel Land -> PLZ vorbelegen
+        self.country_combobox.bind("<<ComboboxSelected>>", self.on_country_change)
 
         # Login
         self.button_login = Button(frame, text="Amazon Login", command=self.login_func, bg='blue', fg='white')
@@ -315,7 +351,6 @@ class AmazonImageScraper:
         Label(perf_frame, text="Min Pause (Sek):").grid(row=0, column=0, padx=2, sticky=E)
         self.min_pause_var = StringVar(value="2")
         Entry(perf_frame, textvariable=self.min_pause_var, width=6).grid(row=0, column=1, padx=2)
-
         Label(perf_frame, text="Max Pause (Sek):").grid(row=0, column=2, padx=2, sticky=E)
         self.max_pause_var = StringVar(value="5")
         Entry(perf_frame, textvariable=self.max_pause_var, width=6).grid(row=0, column=3, padx=2)
@@ -328,12 +363,15 @@ class AmazonImageScraper:
         self.min_image_cols_var = StringVar(value="9")
         Entry(perf_frame, textvariable=self.min_image_cols_var, width=6).grid(row=1, column=3, padx=2)
 
-        # Neue Eingabe: Liefer-PLZ
+        # Liefer-PLZ
         plz_frame = Frame(frame); plz_frame.pack(pady=5)
         Label(plz_frame, text="Liefer-PLZ:").grid(row=0, column=0, padx=5, sticky=E)
         self.zip_var = StringVar(value="")
         Entry(plz_frame, textvariable=self.zip_var, width=12).grid(row=0, column=1, padx=5, sticky=W)
         Label(plz_frame, text="(wird vor der 1. Suche angewendet)").grid(row=0, column=2, padx=5, sticky=W)
+
+        # Initiale PLZ entsprechend der Voreinstellung (Deutschland)
+        self.zip_var.set(self.default_zip.get(self.country_combobox.get(), ""))
 
         # Datei Button
         self.button1 = Button(frame, text="ASIN.csv Liste öffnen", command=self.start_scraping, bg='#0a7', fg='white')
@@ -350,6 +388,12 @@ class AmazonImageScraper:
         self.is_logged_in = False
         self.current_domain = "amazon.de"
 
+    # Handler – setzt die Standard-PLZ beim Landauswahlwechsel
+    def on_country_change(self, event=None):
+        sel = self.country_var.get()
+        default_zip = self.default_zip.get(sel, "")
+        self.zip_var.set(default_zip)
+
     def get_selected_domain(self):
         sel = self.country_var.get()
         return self.countries.get(sel, {"domain":"amazon.de"})["domain"]
@@ -363,19 +407,31 @@ class AmazonImageScraper:
         ])
 
     def setup_chrome_options(self, headless=None):
-        if headless is None: headless = self.headless_var.get()
+        if headless is None:
+            headless = self.headless_var.get()
         opts = Options()
-        opts.add_argument("--no-sandbox"); opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument("--disable-gpu"); opts.add_argument("--window-size=1920,1080")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--window-size=1920,1080")
         opts.add_argument("--disable-blink-features=AutomationControlled")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-        opts.add_experimental_option('useAutomationExtension', False)
-        # Browser-Bilder aus (wir laden separat):
+        opts.add_experimental_option("useAutomationExtension", False)
+        # Bilder im Browser aus (wir laden separat)
         opts.add_argument("--blink-settings=imagesEnabled=false")
-        user_data_dir = os.path.join(os.getcwd(), f"chrome_user_data_{self.get_selected_domain().replace('.', '_')}")
+
+        # WICHTIG: pro Lauf ein eindeutiges Profil, damit kein "already in use"
+        base = os.path.join(os.getcwd(), "chrome_profiles")
+        os.makedirs(base, exist_ok=True)
+        uniq = f"profile_{self.get_selected_domain().replace('.', '_')}_{int(time.time()*1000)}_{random.randint(1000,9999)}"
+        user_data_dir = os.path.join(base, uniq)
         opts.add_argument(f"--user-data-dir={user_data_dir}")
+
+        # Zufälliger User-Agent
         opts.add_argument(f"--user-agent={self.get_random_user_agent()}")
-        if headless: opts.add_argument("--headless=new")
+
+        if headless:
+            opts.add_argument("--headless=new")
         return opts
 
     def save_cookies(self, driver):
@@ -446,7 +502,7 @@ class AmazonImageScraper:
                          f"?openid.pape.max_auth_age=900"
                          f"&openid.return_to=https%3A%2F%2Fwww.{domain}%2Fgp%2Fyourstore%2Fhome%3F"
                          f"language%3Den%26path%3D%252Fgp%252Fyourstore%252Fhome%26signIn%3D1"
-                         f"%26useRedirectOnSuccess%3D1%26action%3Dsign-out%26ref_%3Dnav_AccountFlyout_signout"
+                         f"%26useRedirectOnSuccess%3D1%26action%3Dsign-out%3Dnav_AccountFlyout_signout"
                          f"&language=en"
                          f"&openid.assoc_handle=deflex"
                          f"&openid.mode=checkid_setup"
@@ -480,55 +536,86 @@ class AmazonImageScraper:
             if hasattr(self, 'complete_button'): self.complete_button.destroy()
             driver.quit(); return False
 
-    # --------- NEU: Liefer-PLZ anwenden, bevor erste Suche startet ---------
+    # --------- Liefer-PLZ vor erster Suche anwenden (mit PL/SE Zweiteilung) ---------
     def apply_zip_before_search(self, driver):
         zip_code = (self.zip_var.get() or "").strip()
         if not zip_code:
             self.update_output("ℹ️ Keine Liefer-PLZ gesetzt – überspringe Standortanpassung.")
             return
 
+        country_label = self.country_var.get()
         domain = self.get_selected_domain()
         self.update_output(f"📍 Setze Liefer-PLZ '{zip_code}' auf {domain}...")
 
         try:
-            # Homepage laden (mit sichtbaren Bildern, sonst sind Popover-Assets evtl. nicht da)
             driver.execute_cdp_cmd('Network.setUserAgentOverride', {"userAgent": self.get_random_user_agent()})
-            driver.get(f"https://www.{domain}/?language=en")
-            WebDriverWait(driver, 15).until(lambda d: d.execute_script("return document.readyState")=="complete")
+        except Exception:
+            pass
 
-            # Popover öffnen
+        try:
+            driver.get(f"https://www.{domain}/?language=en")
+            WebDriverWait(driver, 15).until(lambda d: d.execute_script("return document.readyState") == "complete")
+
+            # Standort-Popover öffnen
             link = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.CSS_SELECTOR, "#nav-global-location-popover-link"))
             )
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link)
-            time.sleep(0.3)
+            time.sleep(0.2)
             try:
                 link.click()
             except Exception:
                 driver.execute_script("arguments[0].click();", link)
 
-            # Input finden & PLZ setzen
-            zip_input = WebDriverWait(driver, 10).until(
-                EC.visibility_of_element_located((By.CSS_SELECTOR, "#GLUXZipUpdateInput"))
-            )
-            zip_input.clear()
-            zip_input.send_keys(zip_code)
+            # Prüfen, ob zweigeteilte Eingabe vorhanden (PL/SE)
+            part0, part1 = split_zip_parts(country_label, zip_code)
 
-            # Apply klicken
-            apply_btn = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, "#GLUXZipUpdate"))
-            )
+            if part0 is not None and part1 is not None:
+                try:
+                    inp0 = WebDriverWait(driver, 6).until(
+                        EC.visibility_of_element_located((By.CSS_SELECTOR, "#GLUXZipInputSectionFieldset #GLUXZipUpdateInput_0"))
+                    )
+                    inp1 = WebDriverWait(driver, 6).until(
+                        EC.visibility_of_element_located((By.CSS_SELECTOR, "#GLUXZipInputSectionFieldset #GLUXZipUpdateInput_1"))
+                    )
+                    inp0.clear(); inp0.send_keys(part0)
+                    inp1.clear(); inp1.send_keys(part1)
+                    apply_btn = WebDriverWait(driver, 6).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, "#GLUXZipUpdate"))
+                    )
+                    try:
+                        apply_btn.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", apply_btn)
+
+                    time.sleep(1.5)
+                    self.update_output(f"✅ Liefer-PLZ (geteilt) gesetzt: {part0}–{part1}")
+                    return
+                except Exception:
+                    self.update_output("↩️ Zweiteilige PLZ-Felder nicht gefunden – nutze Einzelfeld-Fallback.")
+
+            # Einzelfeld (Standard)
             try:
-                apply_btn.click()
-            except Exception:
-                driver.execute_script("arguments[0].click();", apply_btn)
+                zip_input = WebDriverWait(driver, 8).until(
+                    EC.visibility_of_element_located((By.CSS_SELECTOR, "#GLUXZipUpdateInput"))
+                )
+                zip_input.clear()
+                zip_input.send_keys(zip_code)
+                apply_btn = WebDriverWait(driver, 6).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, "#GLUXZipUpdate"))
+                )
+                try:
+                    apply_btn.click()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", apply_btn)
 
-            # Kurzes Warten, bis Standort übernommen wird
-            time.sleep(2.0)
-            self.update_output("✅ Liefer-PLZ angewendet.")
+                time.sleep(1.5)
+                self.update_output("✅ Liefer-PLZ (ein Feld) angewendet.")
+            except Exception as e:
+                self.update_output(f"⚠️ Konnte Liefer-PLZ nicht setzen: {e}. Fahre ohne fort.")
 
         except Exception as e:
-            self.update_output(f"⚠️ Konnte Liefer-PLZ nicht setzen: {e}. Fahre ohne fort.")
+            self.update_output(f"⚠️ Standortdialog nicht erfolgreich: {e}. Fahre ohne fort.")
 
     def scrape_product_data(self):
         if not self.is_logged_in:
@@ -573,7 +660,7 @@ class AmazonImageScraper:
                 driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
                 self.load_cookies(driver)
 
-                # >>> Neu: Liefer-PLZ setzen, BEVOR die erste Produktseite geladen wird
+                # Liefer-PLZ setzen BEVOR die erste Produktseite geladen wird
                 self.apply_zip_before_search(driver)
 
                 for i, asin_raw in enumerate(data.iloc[:,0]):
@@ -605,24 +692,20 @@ class AmazonImageScraper:
                         if not ok:
                             self.update_output(f"   ❌ ASIN {asin} konnte nicht geladen werden"); continue
 
-                        # ======= Hauptbild anklicken (Immersive View/Galerie initialisieren) =======
                         if click_main_image_to_init_gallery(driver):
                             self.update_output("   🔎 Hauptbild angeklickt, um Galerie zu laden...")
                             time.sleep(1.2)
                         else:
                             self.update_output("   ⚠️ Hauptbild nicht klickbar – versuche dennoch, Galerie zu laden")
 
-                        # ======= Galerie wirklich laden (Lazy-Load triggern) =======
                         gallery_ok = ensure_gallery_loaded(driver, max_wait=10, scroll_tries=4)
                         if not gallery_ok:
                             self.update_output("   ⚠️ Galerie (ivRow) nicht sicher geladen – fahre dennoch fort")
 
-                        # jetzt frisches HTML holen
                         html = driver.page_source
                         soup = BeautifulSoup(html, "html.parser")
                         self.update_output("   Extrahiere Produktdaten...")
 
-                        # Titel
                         title_el = (
                             soup.find('span', id="productTitle") or
                             soup.find('h1', class_="a-size-large product-title-word-break") or
@@ -630,10 +713,8 @@ class AmazonImageScraper:
                         )
                         title = title_el.get_text(strip=True) if title_el else "Titel nicht gefunden"
 
-                        # Preis
                         price = extract_price(soup, domain)
 
-                        # Verkäufer (leer, wenn nicht gefunden)
                         seller_el = (
                             soup.find('span', {'class': 'a-size-small mbcMerchantName'}) or
                             soup.find('a', {'id':'sellerProfileTriggerId'}) or
@@ -641,25 +722,19 @@ class AmazonImageScraper:
                         )
                         seller = seller_el.get_text(strip=True) if seller_el else ""
 
-                        # Buybox-Entscheidung NUR über Verkäufer-Feld:
-                        # - Verkäufer leer  -> Nicht Qualifiziert
-                        # - Verkäufer gesetzt -> Qualifiziert
                         buybox = "Qualifiziert" if seller else "Nicht Qualifiziert"
 
-                        # Schreiben Basisdaten
                         worksheet.write(row, 0, sanitize_excel_text(asin))
                         worksheet.write(row, 1, sanitize_excel_text(title))
                         worksheet.write(row, 2, sanitize_excel_text(price))
                         worksheet.write(row, 3, sanitize_excel_text(seller))
                         worksheet.write(row, 4, sanitize_excel_text(buybox))
 
-                        # --------- Bilder (nur ivRow) ---------
                         urls = extract_image_urls(soup, want=50)
                         self.update_output(f"   Galerie-URLs aus ivRow (dedupl.): {len(urls)}")
 
                         col_offset = 5
                         needed_cols = max(min_cols, len(urls))
-                        # Header + Spaltenbreite — dynamisch erweitern
                         if row == 1:
                             for h in range(needed_cols):
                                 worksheet.write(0, col_offset + h, f'Bild {h+1}')
@@ -676,7 +751,6 @@ class AmazonImageScraper:
                             img_stream, fname, (w,h) = download_image_safe(hi)
                             if not img_stream:
                                 continue
-                            # sehr kleine Icons/Badges raus (z.B. 125×125 360°-Icon)
                             if w <= 130 and h <= 130:
                                 continue
 
