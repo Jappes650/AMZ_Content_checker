@@ -746,7 +746,54 @@ class AmazonImageScraper:
                             except TimeoutException:
                                 self.update_output("   Timeout"); continue
                         if not ok:
-                            self.update_output(f"   ❌ ASIN {asin} konnte nicht geladen werden"); continue
+                            # --- Fallback prüfen: Bot-Block oder wirklich offline ---
+                            self.update_output(f"   ⚠️ ASIN {asin} wurde beim ersten Versuch nicht gefunden. Prüfe auf Bot-Block...")
+
+                            try:
+                                page_html = driver.page_source
+                                soup_fallback = BeautifulSoup(page_html, "html.parser")
+
+                                # Suche nach generischem Button mit a-button a-button-primary a-span12
+                                bot_button = soup_fallback.select_one("span.a-button.a-button-primary.a-span12 button.a-button-text")
+
+                                if bot_button is not None:
+                                    self.update_output("   🚧 Verdacht auf Bot-Erkennung – klicke Button und versuche ASIN erneut zu laden...")
+
+                                    try:
+                                        # Versuche den Button im echten Browser zu finden und zu klicken
+                                        btn_elem = WebDriverWait(driver, 5).until(
+                                            EC.element_to_be_clickable((By.CSS_SELECTOR, "span.a-button.a-button-primary.a-span12 button.a-button-text"))
+                                        )
+                                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn_elem)
+                                        time.sleep(0.3)
+                                        try:
+                                            btn_elem.click()
+                                        except Exception:
+                                            driver.execute_script("arguments[0].click();", btn_elem)
+                                        self.update_output("   🖱️ Button wurde geklickt – lade ASIN erneut...")
+
+                                        # Erneuter Versuch nach Klick
+                                        retry_url = f"https://www.{domain}/dp/{asin}/"
+                                        driver.get(retry_url)
+                                        WebDriverWait(driver, 12).until(lambda d: d.execute_script("return document.readyState") == "complete")
+                                        time.sleep(random.uniform(1.0, 2.0))
+
+                                        if "/dp/" in driver.current_url and "productTitle" in driver.page_source:
+                                            self.update_output("   ✅ ASIN beim zweiten Versuch erfolgreich geladen (nach Bot-Block).")
+                                            ok = True
+                                        else:
+                                            self.update_output("   ❌ Auch nach Fallback kein Produkt gefunden.")
+                                    except Exception as retry_err:
+                                        self.update_output(f"   ❌ Fehler beim Fallback-Versuch: {retry_err}")
+
+                                else:
+                                    self.update_output("   ❌ Kein Bot-Button gefunden – ASIN scheint wirklich offline zu sein.")
+
+                            except Exception as fb_err:
+                                self.update_output(f"   ⚠️ Fehler bei Fallback-Prüfung: {fb_err}")
+
+                            if not ok:
+                                continue
 
                         if click_main_image_to_init_gallery(driver):
                             self.update_output("   🔎 Hauptbild angeklickt, um Galerie zu laden...")
