@@ -464,9 +464,55 @@ class AmazonImageScraper:
     def check_login_status(self, driver):
         try:
             domain = self.get_selected_domain()
-            driver.get(f"https://www.{domain}/gp/css/homepage.html"); time.sleep(3)
+
+            # Seite aufrufen – Sprache egal, da wir visuelle Prüfung machen
+            driver.get(f"https://www.{domain}/?language=en")
+            WebDriverWait(driver, 10).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
+            )
+            time.sleep(1.0)
+
+            # 1) Account-Zeile prüfen
+            acct_txt = ""
+            try:
+                el = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "#nav-link-accountList-nav-line-1"))
+                )
+                acct_txt = (el.text or "").strip().lower()
+            except Exception:
+                pass
+
+            # Falls leer -> evtl. anderes Layout
+            if not acct_txt:
+                try:
+                    el2 = driver.find_element(By.CSS_SELECTOR, "#nav-link-accountList")
+                    acct_txt = (el2.text or "").strip().lower()
+                except Exception:
+                    pass
+
+            # Wenn "sign" oder "login"/"anmelden" etc. im Text steht -> NICHT eingeloggt
+            # Ansonsten ist meist dein Name oder "Hallo" dort -> eingeloggt
+            if acct_txt:
+                lower = acct_txt.replace("’", "'")  # typografische Varianten
+                # negativ prüfen, nicht positiv
+                if any(word in lower for word in ["sign", "anmel", "log", "ident", "acced", "iniciar", "connect"]):
+                    return False
+                else:
+                    return True
+
+            # 2) Cookie-Fallback
+            cookie_names = {c.get("name", "") for c in driver.get_cookies()}
+            auth_cookies = {"at-main", "sess-at-main", "ubid-main", "session-id", "x-main", "at-acbuk"}
+            if cookie_names.intersection(auth_cookies):
+                return True
+
+            # 3) HTML-Fallback
             page = driver.page_source.lower()
-            return any(k in page for k in ["sign out","abmelden","bestellungen","your orders"])
+            if any(x in page for x in ["signout", "abmelden", "bestellungen", "your orders"]):
+                return True
+
+            return False
+
         except Exception as e:
             self.update_output(f"❌ Fehler bei Login-Status-Prüfung: {e}")
             return False
@@ -486,6 +532,12 @@ class AmazonImageScraper:
             return os.path.join(desktop, f"Amazon_Output_{int(time.time())}.xlsx")
 
     def amazon_login(self):
+        # --- Sicherstellen, dass das chrome_profiles-Verzeichnis existiert ---
+        base = os.path.join(os.getcwd(), "chrome_profiles")
+        try:
+            os.makedirs(base, exist_ok=True)
+        except Exception as e:
+            self.update_output(f"⚠️ Konnte Profil-Ordner nicht erstellen: {e}")
         domain = self.get_selected_domain()
         opts = self.setup_chrome_options(headless=False)
         service = Service(ChromeDriverManager().install())
