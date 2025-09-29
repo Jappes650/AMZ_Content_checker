@@ -498,15 +498,19 @@ class AmazonImageScraper:
                 self.login_status.config(text=f"Status: Angemeldet ({domain}) ✅", fg='green')
                 driver.quit(); return True
 
-            login_url = (f"https://www.{domain}/ap/signin"
-                         f"?openid.pape.max_auth_age=900"
-                         f"&openid.return_to=https%3A%2F%2Fwww.{domain}%2Fgp%2Fyourstore%2Fhome%3F"
-                         f"language%3Den%26path%3D%252Fgp%252Fyourstore%252Fhome%26signIn%3D1"
-                         f"%26useRedirectOnSuccess%3D1%26action%3Dsign-out%3Dnav_AccountFlyout_signout"
-                         f"&language=en"
-                         f"&openid.assoc_handle=deflex"
-                         f"&openid.mode=checkid_setup"
-                         f"&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0")
+                 
+            country_code = domain.split('.')[-1]
+            login_url = (
+                f"https://www.{domain}/ap/signin"
+                f"?openid.pape.max_auth_age=0"
+                f"&openid.return_to=https%3A%2F%2Fwww.{domain}%2Fgp%2Fyourstore%2Fhome%3F"
+                f"language%3Den%26path%3D%252Fgp%252Fyourstore%252Fhome%26signIn%3D1"
+                f"%26useRedirectOnSuccess%3D1%26action%3Dsign-out%26ref_%3Dnav_AccountFlyout_signout"
+                f"&language={country_code}"
+                f"&openid.assoc_handle={country_code}flex"
+                f"&openid.mode=checkid_setup"
+                f"&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0"
+            )
             self.update_output(f"🔍 Öffne Login: {domain}")
             driver.get(login_url); time.sleep(3)
             self.update_output("🔒 Bitte im Browser einloggen und dann 'Login abschließen' klicken.")
